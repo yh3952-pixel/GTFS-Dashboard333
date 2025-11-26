@@ -231,7 +231,7 @@ def _parse_time_any(series: pd.Series) -> pd.Series:
         return pd.Series([], dtype="datetime64[ns]")
     s = series
     if pd.api.types.is_numeric_dtype(s):
-        # epoch 秒 -> datetime（不设 utc，由后续自动检测时区）
+        # epoch 秒 -> datetime
         s = pd.to_datetime(s, unit="s", errors="coerce")
     else:
         s = pd.to_datetime(s, errors="coerce")
@@ -297,7 +297,6 @@ def filter_feed_df(df: pd.DataFrame) -> pd.DataFrame:
     med_utc = d_utc.median()
 
     # 如果“离 now_utc 更近”，说明原始时间写的是 UTC，需要整体平移到纽约时间
-    # 用一个小容差防抖（比如 30 分钟）
     tolerance = pd.Timedelta("0 days 00:30:00")
     if pd.notna(med_utc) and pd.notna(med_local) and med_utc + tolerance < med_local:
         offset = now_local - now_utc  # 通常是 -5 小时或 -4 小时
@@ -480,7 +479,7 @@ def _base_fig(center=(40.8, -74), zoom=10) -> go.Figure:
         legend=dict(
             title="Routes",
             groupclick="togglegroup",
-            bgcolor="rgba(0, 0, 0, 0),
+            bgcolor="rgba(0, 0, 0, 0)",
         ),
     )
     return fig
@@ -535,7 +534,7 @@ def _add_lines_to_fig(
 #   各图层构图
 # =========================
 def _fmt_time_for_hover(t) -> str:
-    """到站时间统一 HH:MM 字符串，避免小数/乱格式"""
+    """到站时间统一 HH:MM 字符串"""
     if pd.isna(t):
         return "N/A"
     if isinstance(t, (pd.Timestamp, datetime)):
