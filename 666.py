@@ -389,6 +389,7 @@ def _with_arrival_hover(
     stops["stop_id"] = stops["stop_id"].astype(str)
     for _, row in stops.iterrows():
         key = (str(route_id), str(row["stop_id"]))
+
         arr = schedule_map.get(key, "N/A")
         texts.append(f"Stop: {row['stop_name']}<br>Next arrival: {arr}")
     return texts
@@ -765,7 +766,7 @@ with st.sidebar:
             fetch_lirr_feed.clear()
             fetch_mnr_feed.clear()
             citibike_station_data.clear()
-            st.experimental_rerun()
+            st.rerun()  # ✅ 新版 API，代替 st.experimental_rerun
     with cols[1]:
         st.caption(f"Last updated: {pd.Timestamp.now().strftime('%H:%M:%S')}")
 
@@ -800,3 +801,4 @@ with st.sidebar:
         f"LIRR routes: {len(lirr_lines)} | "
         f"bus({_bn}): {len(bus_routes_for_bn)}"
     )
+
