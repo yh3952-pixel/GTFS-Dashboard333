@@ -226,6 +226,9 @@ def filter_feed_df(df: pd.DataFrame) -> pd.DataFrame:
       - 解析 arrival/departure
       - 合成 when，并过滤 when >= now
       - 对每个 (route, stop) 选最早的未来时刻
+
+    注意：统一用纽约时区（America/New_York）做“当前时间”，
+    避免服务器在 UTC 导致时间偏 5 小时的问题。
     """
     if df is None or df.empty:
         return pd.DataFrame(
@@ -239,7 +242,9 @@ def filter_feed_df(df: pd.DataFrame) -> pd.DataFrame:
     for col in ["arrival_time", "departure_time"]:
         df[col] = pd.to_datetime(df[col], errors="coerce")
 
-    now = pd.Timestamp.now()
+    # 用纽约时间，并去掉 tz 信息，保证和 feed 里的 naive 时间一致
+    now = pd.Timestamp.now(tz="America/New_York").tz_localize(None)
+
     df["when"] = df["arrival_time"].fillna(df["departure_time"])
     df = df.dropna(subset=["when"])
     df = df[df["when"] >= now]
@@ -255,6 +260,7 @@ def filter_feed_df(df: pd.DataFrame) -> pd.DataFrame:
         .first()[["route", "stop_id", "arrival_time", "departure_time"]]
     )
     return df
+
 
 
 @st.cache_data(ttl=30, show_spinner=False)
