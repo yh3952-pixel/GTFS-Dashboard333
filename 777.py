@@ -1,4 +1,4 @@
-# app_streamlit.py —— 懒加载版（未来班次过滤 + 30s 刷新 + Bus 折叠 + 稳定线路几何 + 官方配色）
+# app_streamlit.py —— 懒加载版（未来班次过滤 + 30s 刷新 + Bus 折叠 + 稳定线路几何 + 官方配色 + 全屏优化 + 时区修复）
 
 from __future__ import annotations
 
@@ -22,6 +22,25 @@ from utils_streamlit import (
 
 # ---- 页面配置尽早设置 ----
 st.set_page_config(page_title="Real Time Transportation Dashboard", layout="wide")
+
+# ====== 注入 CSS 以减少顶部留白，实现更“全屏”的效果 ======
+st.markdown(
+    """
+    <style>
+        /* 移除顶部大面积留白 */
+        .block-container {
+            padding-top: 1rem;
+            padding-bottom: 0rem;
+            padding-left: 1rem;
+            padding-right: 1rem;
+        }
+        /* 隐藏右上角汉堡菜单和 footer (可选) */
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ====== 可选：非阻塞自动刷新 ======
 try:
@@ -219,39 +238,16 @@ def get_bus_route_ids(borough: str) -> list[str]:
 # =========================
 #   实时 feed（缓存 30s & 仅保留未来班次）
 # =========================
-
-def _parse_time_any(series: pd.Series) -> pd.Series:
-    """
-    把任意格式的时间列转成“无时区的 datetime”：
-      - 数字：当作 epoch 秒
-      - 其它：交给 pandas 去 parse
-      - 如果原本带 tz，去掉 tz 但保留“墙上时间”
-    """
-    if series is None:
-        return pd.Series([], dtype="datetime64[ns]")
-    s = series
-    if pd.api.types.is_numeric_dtype(s):
-        # epoch 秒 -> datetime
-        s = pd.to_datetime(s, unit="s", errors="coerce")
-    else:
-        s = pd.to_datetime(s, errors="coerce")
-    try:
-        # 如果有 tz，去掉 tz，保留本地时间
-        if getattr(s.dt, "tz", None) is not None:
-            s = s.dt.tz_localize(None)
-    except Exception:
-        pass
-    return s
-
-
 def filter_feed_df(df: pd.DataFrame) -> pd.DataFrame:
     """
     仅保留“此刻之后”的最近一班：
       - route/stop_id 统一为 str
-      - 自动检测 feed 时间是按 UTC 还是本地：
-          * 如果更接近 UTC -> 视为 UTC，整体平移到纽约时间
-          * 否则视为纽约本地时间
+      - 解析 arrival/departure (修复时区：UTC -> NY)
+      - 合成 when，并过滤 when >= now
       - 对每个 (route, stop) 选最早的未来时刻
+
+    注意：统一用纽约时区（America/New_York）做“当前时间”，
+    避免服务器在 UTC 导致时间偏 5 小时的问题。
     """
     if df is None or df.empty:
         return pd.DataFrame(
@@ -259,52 +255,29 @@ def filter_feed_df(df: pd.DataFrame) -> pd.DataFrame:
         )
 
     df = df.copy()
-    if "route" not in df.columns or "stop_id" not in df.columns:
-        return pd.DataFrame(
-            columns=["route", "stop_id", "arrival_time", "departure_time"]
-        )
-
     df["route"] = df["route"].astype(str)
     df["stop_id"] = df["stop_id"].astype(str)
 
-    # 统一解析时间列为 naive datetime
+    # 修复时间解析：MTA Feed 是 UTC 时间戳，需要转为 纽约时间
     for col in ["arrival_time", "departure_time"]:
-        if col not in df.columns:
-            df[col] = pd.NaT
-        else:
-            df[col] = _parse_time_any(df[col])
+        # 1. 转为 datetime (此时如果是 timestamp，默认为 UTC naive)
+        df[col] = pd.to_datetime(df[col], errors="coerce")
+        
+        if not df[col].empty:
+            # 2. 如果没有时区信息（naive），假设它是 UTC，然后转换到 NY
+            if df[col].dt.tz is None:
+                df[col] = df[col].dt.tz_localize("UTC")
+            
+            # 3. 转换为纽约时间，最后去时区 (变成 local naive time)，方便显示和比较
+            df[col] = df[col].dt.tz_convert("America/New_York").dt.tz_localize(None)
 
-    # 当前纽约时间（有 tz 和无 tz 两个版本）
-    now_local_tz = pd.Timestamp.now(tz="America/New_York")
-    now_local = now_local_tz.tz_localize(None)
-    now_utc_tz = now_local_tz.tz_convert("UTC")
-    now_utc = now_utc_tz.tz_localize(None)
+    # 用纽约时间
+    now = pd.Timestamp.now(tz="America/New_York").tz_localize(None)
 
-    # 合成“事件时间”
     df["when"] = df["arrival_time"].fillna(df["departure_time"])
     df = df.dropna(subset=["when"])
-    if df.empty:
-        return pd.DataFrame(
-            columns=["route", "stop_id", "arrival_time", "departure_time"]
-        )
+    df = df[df["when"] >= now]
 
-    # ===== 自动检测：这些时间更像是 UTC 还是纽约本地？ =====
-    candidate = df["when"].dropna()
-    d_local = (candidate - now_local).abs()
-    d_utc = (candidate - now_utc).abs()
-
-    med_local = d_local.median()
-    med_utc = d_utc.median()
-
-    # 如果“离 now_utc 更近”，说明原始时间写的是 UTC，需要整体平移到纽约时间
-    tolerance = pd.Timedelta("0 days 00:30:00")
-    if pd.notna(med_utc) and pd.notna(med_local) and med_utc + tolerance < med_local:
-        offset = now_local - now_utc  # 通常是 -5 小时或 -4 小时
-        for col in ["arrival_time", "departure_time", "when"]:
-            df[col] = df[col] + offset
-
-    # 最终按纽约本地 now_local 做“未来班次过滤”
-    df = df[df["when"] >= now_local]
     if df.empty:
         return pd.DataFrame(
             columns=["route", "stop_id", "arrival_time", "departure_time"]
@@ -316,6 +289,7 @@ def filter_feed_df(df: pd.DataFrame) -> pd.DataFrame:
         .first()[["route", "stop_id", "arrival_time", "departure_time"]]
     )
     return df
+
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -450,6 +424,7 @@ def _with_arrival_hover(
     stops["stop_id"] = stops["stop_id"].astype(str)
     for _, row in stops.iterrows():
         key = (str(route_id), str(row["stop_id"]))
+
         arr = schedule_map.get(key, "N/A")
         texts.append(f"Stop: {row['stop_name']}<br>Next arrival: {arr}")
     return texts
@@ -533,15 +508,6 @@ def _add_lines_to_fig(
 # =========================
 #   各图层构图
 # =========================
-def _fmt_time_for_hover(t) -> str:
-    """到站时间统一 HH:MM 字符串"""
-    if pd.isna(t):
-        return "N/A"
-    if isinstance(t, (pd.Timestamp, datetime)):
-        return t.strftime("%H:%M")
-    return str(t)
-
-
 def build_subway_figure(
     selected_routes: list[str], show_arrival: bool, show_stops: bool
 ) -> go.Figure:
@@ -557,7 +523,7 @@ def build_subway_figure(
             if not sched.empty:
                 sched["stop_id"] = sched["stop_id"].astype(str)
                 schedule_map = {
-                    (str(r), str(s)): _fmt_time_for_hover(a)
+                    (str(r), str(s)): str(a)
                     for r, s, a in zip(
                         sched["route"], sched["stop_id"], sched["arrival_time"]
                     )
@@ -599,7 +565,7 @@ def build_bus_borough_figure(
             if not sched.empty:
                 sched["stop_id"] = sched["stop_id"].astype(str)
                 schedule_map = {
-                    (str(r), str(s)): _fmt_time_for_hover(a)
+                    (str(r), str(s)): str(a)
                     for r, s, a in zip(
                         sched["route"], sched["stop_id"], sched["arrival_time"]
                     )
@@ -640,7 +606,7 @@ def build_lirr_figure(
             if not sched.empty:
                 sched["stop_id"] = sched["stop_id"].astype(str)
                 schedule_map = {
-                    (str(r), str(s)): _fmt_time_for_hover(a)
+                    (str(r), str(s)): str(a)
                     for r, s, a in zip(
                         sched["route"], sched["stop_id"], sched["arrival_time"]
                     )
@@ -777,7 +743,7 @@ def build_citibike_figure(selected_regions: list[str]) -> go.Figure:
 
 
 # =========================
-#         UI
+#           UI
 # =========================
 st.title("Real Time Transportation Dashboard")
 
@@ -823,6 +789,10 @@ with st.sidebar:
         selected_regions = st.multiselect(
             "Citibike regions", CITIBIKE_REGIONS, default=CITIBIKE_REGIONS
         )
+    
+    # 增加地图高度控制
+    st.divider()
+    map_height = st.slider("Map Height (px)", min_value=400, max_value=1200, value=800, step=50)
 
     # 立即刷新按钮 + 上次更新时间
     st.divider()
@@ -835,7 +805,7 @@ with st.sidebar:
             fetch_lirr_feed.clear()
             fetch_mnr_feed.clear()
             citibike_station_data.clear()
-            st.rerun()
+            st.rerun()  # ✅ 新版 API，代替 st.experimental_rerun
     with cols[1]:
         st.caption(f"Last updated: {pd.Timestamp.now().strftime('%H:%M:%S')}")
 
@@ -853,6 +823,9 @@ try:
         fig = build_bus_borough_figure(_borough, selected_bus, show_arrival, show_stops)
     else:  # citibike
         fig = build_citibike_figure(selected_regions or CITIBIKE_REGIONS)
+    
+    # 应用全屏高度
+    fig.update_layout(height=map_height)
 
     st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
 except Exception as e:
