@@ -1,4 +1,4 @@
-# app_streamlit.py —— 懒加载版（未来班次过滤 + 30s 刷新 + Bus 折叠 + 稳定线路几何 + 官方配色 + 全屏优化）
+# app_streamlit.py —— 懒加载版（未来班次过滤 + 30s 刷新 + Bus 折叠 + 稳定线路几何 + 官方配色 + 全屏优化 + 时区修复）
 
 from __future__ import annotations
 
@@ -242,7 +242,7 @@ def filter_feed_df(df: pd.DataFrame) -> pd.DataFrame:
     """
     仅保留“此刻之后”的最近一班：
       - route/stop_id 统一为 str
-      - 解析 arrival/departure
+      - 解析 arrival/departure (修复时区：UTC -> NY)
       - 合成 when，并过滤 when >= now
       - 对每个 (route, stop) 选最早的未来时刻
 
@@ -258,10 +258,20 @@ def filter_feed_df(df: pd.DataFrame) -> pd.DataFrame:
     df["route"] = df["route"].astype(str)
     df["stop_id"] = df["stop_id"].astype(str)
 
+    # 修复时间解析：MTA Feed 是 UTC 时间戳，需要转为 纽约时间
     for col in ["arrival_time", "departure_time"]:
+        # 1. 转为 datetime (此时如果是 timestamp，默认为 UTC naive)
         df[col] = pd.to_datetime(df[col], errors="coerce")
+        
+        if not df[col].empty:
+            # 2. 如果没有时区信息（naive），假设它是 UTC，然后转换到 NY
+            if df[col].dt.tz is None:
+                df[col] = df[col].dt.tz_localize("UTC")
+            
+            # 3. 转换为纽约时间，最后去时区 (变成 local naive time)，方便显示和比较
+            df[col] = df[col].dt.tz_convert("America/New_York").dt.tz_localize(None)
 
-    # 用纽约时间，并去掉 tz 信息，保证和 feed 里的 naive 时间一致
+    # 用纽约时间
     now = pd.Timestamp.now(tz="America/New_York").tz_localize(None)
 
     df["when"] = df["arrival_time"].fillna(df["departure_time"])
